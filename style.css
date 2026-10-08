@@ -70,3 +70,5 @@ body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;op
 .drop:hover::after{opacity:1}
 .a{animation:fade .5s ease both}.q{animation:fade .3s ease both}
 @media (prefers-reduced-motion:reduce){.ln>span,.ln>em>span,.lede,.drop,.a,.q{animation:none;opacity:1;transform:none}}
+
+@media (max-width:860px){.ready .steps,.ready .bar{display:none}#mapCanvas{height:120px}.side{padding:16px}.doc-meta{margin-bottom:10px}.work{margin-top:16px;gap:18px}.ask{padding-bottom:max(14px,env(safe-area-inset-bottom))}}
