@@ -17,7 +17,7 @@
 
 <main>
   <section class="hero" id="hero">
-    <h1>Ask your document.<br><em>Get the page it came from.</em></h1>
+    <h1><span class="ln"><span>Ask your document.</span></span><br><span class="ln"><em><span>Get the page it came from.</span></em></span></h1>
     <p class="lede">Drop in lecture notes, a paper or a report. Marginalia reads it, finds the passages that answer your question and quotes them with page numbers. If the answer is not in the document, it tells you that instead of guessing.</p>
     <label class="drop" id="drop" tabindex="0">
       <input type="file" id="file" accept="application/pdf,.pdf,text/plain,.txt,.md">
@@ -39,6 +39,7 @@
       <div class="bar"><div class="bar-in" id="bar"></div></div>
       <div class="status" id="status">Starting</div>
       <div class="mapwrap"><canvas id="mapCanvas" aria-label="Map of your document's passages by meaning"></canvas><div class="maplab">Map of your document by meaning. Each dot is a passage; your question lands near the passages it matches.</div></div>
+      <label class="writeRow" id="writeRow" hidden><input type="checkbox" id="writeOn"> <span>Also write a short answer. Downloads a 1 GB model once and runs on your GPU. Quotes stay the source of truth.</span></label>
       <button class="ghost" id="reset" type="button">Use another document</button>
       <details class="how"><summary>How answers are made</summary>
         <p>Your question is turned into a vector and compared with every passage. The best sentences from the closest passages are quoted back, each with its page. Nothing is paraphrased or invented. If nothing is close enough, Marginalia says it could not find the answer. It cannot reason across pages or do arithmetic; it finds and quotes.</p>
