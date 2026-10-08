@@ -22,6 +22,7 @@ function step(name, pct) {
 function fail(msg) { const e = $("#err"); e.textContent = msg; e.hidden = false; }
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const words = (s) => s.toLowerCase().match(/[a-z0-9][a-z0-9'-]*/g) || [];
+const stem = (w) => w.replace(/(ing|ed|es|s)$/, "");
 const keyWords = (s) => words(s).filter((w) => !STOP.has(w) && w.length > 2);
 
 /* ---------- read ---------- */
@@ -100,32 +101,98 @@ const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] 
 
 /* ---------- ask ---------- */
 function lexical(q, text) {
-  const qs = new Set(keyWords(q)); if (!qs.size) return 0;
-  const ts = new Set(words(text)); let hit = 0;
-  qs.forEach((w) => { if (ts.has(w) || ts.has(w.replace(/s$/, ""))) hit++; });
+  const qs = new Set(keyWords(q).map(stem)); if (!qs.size) return 0;
+  const ts = new Set(words(text).map(stem)); let hit = 0;
+  qs.forEach((w) => { if (ts.has(w)) hit++; });
   return hit / qs.size;
 }
 async function answer(q) {
   const [qv] = await embed([q]);
   const scored = state.chunks.map((c, i) => {
     const sem = dot(qv, state.vecs[i]), lex = lexical(q, c.text);
-    return { c, sem, lex, score: sem * 0.75 + lex * 0.25 };
+    return { c, i, sem, lex, score: sem * 0.7 + lex * 0.3 };
   }).sort((a, b) => b.score - a.score);
   const top = scored.slice(0, 4);
   const best = top[0];
-  if (!best || best.sem < MIN_SCORE || (best.lex === 0 && best.sem < 0.45)) return { found: false, best };
-  // sentence-level pick from the closest passages
+  const bestSem = Math.max(...top.map((t) => t.sem)), bestLex = Math.max(...top.map((t) => t.lex));
+  const base = { qv, top, best };
+  // gate: strong keyword overlap, or clearly similar meaning. Otherwise refuse.
+  if (!best || !(bestLex >= 0.5 || bestSem >= 0.36)) return { ...base, found: false };
   const cand = [];
   for (const t of top) for (const s of t.c.sents) if (s.split(/\s+/).length >= 4) cand.push({ s, page: t.c.page, chunk: t.c });
   const sv = await embed(cand.map((x) => x.s));
-  cand.forEach((x, i) => { x.sem = dot(qv, sv[i]); x.lex = lexical(q, x.s); x.score = x.sem * 0.7 + x.lex * 0.3; });
+  cand.forEach((x, i) => { x.sem = dot(qv, sv[i]); x.lex = lexical(q, x.s); x.score = x.sem * 0.6 + x.lex * 0.4; });
   cand.sort((a, b) => b.score - a.score);
+  const lead = cand[0];
+  if (!lead || (lead.lex < 0.34 && lead.sem < 0.33)) return { ...base, found: false };
   const pick = [];
-  for (const x of cand) { if (pick.length >= 3) break; if (x.sem < MIN_SCORE - 0.05) continue; if (pick.some((p) => p.s === x.s)) continue; pick.push(x); }
-  if (!pick.length) return { found: false, best };
-  pick.sort((a, b) => a.page - b.page);
-  return { found: true, pick, top, best };
+  for (const x of cand) {
+    if (pick.length >= 3) break;
+    if (x.score < lead.score * 0.82 || pick.some((p) => p.s === x.s)) continue;
+    pick.push(x);
+  }
+  pick.sort((a, b) => a.page - b.page || state.chunks.indexOf(a.chunk) - state.chunks.indexOf(b.chunk));
+  return { ...base, found: true, pick };
 }
+
+/* ---------- semantic map (real 2-D projection of the passage vectors) ---------- */
+function pca2(vecs) {
+  const n = vecs.length, d = vecs[0].length, mean = new Float32Array(d);
+  vecs.forEach((v) => { for (let j = 0; j < d; j++) mean[j] += v[j] / n; });
+  const X = vecs.map((v) => Float32Array.from(v, (x, j) => x - mean[j]));
+  const comps = [];
+  for (let c = 0; c < 2; c++) {
+    let w = Float32Array.from({ length: d }, (_, j) => Math.sin(j * 12.9898 + c * 78.233));
+    for (let it = 0; it < 40; it++) {
+      const z = new Float32Array(d);
+      for (const x of X) { let p = 0; for (let j = 0; j < d; j++) p += x[j] * w[j]; for (let j = 0; j < d; j++) z[j] += x[j] * p; }
+      for (const u of comps) { let p = 0; for (let j = 0; j < d; j++) p += z[j] * u[j]; for (let j = 0; j < d; j++) z[j] -= p * u[j]; }
+      let nn = 0; for (let j = 0; j < d; j++) nn += z[j] * z[j]; nn = Math.sqrt(nn) || 1;
+      for (let j = 0; j < d; j++) w[j] = z[j] / nn;
+    }
+    comps.push(w);
+  }
+  const proj = (v) => comps.map((u) => { let p = 0; for (let j = 0; j < v.length; j++) p += (v[j] - mean[j]) * u[j]; return p; });
+  return { proj };
+}
+const map = { pts: [], q: null, hits: [], t0: 0, raf: 0, pca: null };
+function layoutMap() {
+  const cv = $("#mapCanvas"), r = cv.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  const P = state.vecs.map(map.pca.proj);
+  const all = map.q ? P.concat([map.q.raw]) : P;
+  const xs = all.map((p) => p[0]), ys = all.map((p) => p[1]);
+  const minx = Math.min(...xs), maxx = Math.max(...xs), miny = Math.min(...ys), maxy = Math.max(...ys);
+  const pad = 22 * dpr, W = cv.width - pad * 2, H = cv.height - pad * 2;
+  map.to = (p) => [pad + ((p[0] - minx) / (maxx - minx || 1)) * W, pad + ((p[1] - miny) / (maxy - miny || 1)) * H];
+  map.pts = P.map(map.to);
+}
+function drawMap(now) {
+  const cv = $("#mapCanvas"), g = cv.getContext("2d"), dpr = cv.width / (cv.getBoundingClientRect().width || 1);
+  g.clearRect(0, 0, cv.width, cv.height);
+  const n = map.pts.length, pages = state.chunks.at(-1).page;
+  const t = (now - map.t0) / 1000;
+  map.pts.forEach((p, i) => {
+    const hit = map.hits.includes(i), appear = Math.min(1, Math.max(0, t * 3 - i * 0.04));
+    const hue = 30 + (state.chunks[i].page / pages) * 40;
+    g.beginPath(); g.arc(p[0], p[1], (hit ? 6 : 3.5) * dpr * appear, 0, 7);
+    g.fillStyle = hit ? "#e0a458" : `hsla(${hue},35%,65%,${0.55 * appear})`; g.fill();
+    if (hit) { g.beginPath(); g.arc(p[0], p[1], (10 + 3 * Math.sin(t * 3)) * dpr, 0, 7); g.strokeStyle = "rgba(224,164,88,.45)"; g.lineWidth = dpr; g.stroke(); }
+  });
+  if (map.q) {
+    const qp = map.to(map.q.raw);
+    map.hits.forEach((i) => { g.beginPath(); g.moveTo(qp[0], qp[1]); g.lineTo(map.pts[i][0], map.pts[i][1]); g.strokeStyle = "rgba(224,164,88,.35)"; g.lineWidth = dpr; g.setLineDash([4 * dpr, 4 * dpr]); g.stroke(); g.setLineDash([]); });
+    g.beginPath(); g.moveTo(qp[0] - 6 * dpr, qp[1]); g.lineTo(qp[0] + 6 * dpr, qp[1]); g.moveTo(qp[0], qp[1] - 6 * dpr); g.lineTo(qp[0], qp[1] + 6 * dpr);
+    g.strokeStyle = "#efe7d8"; g.lineWidth = 1.5 * dpr; g.stroke();
+  }
+  map.raf = requestAnimationFrame(drawMap);
+}
+function startMap() {
+  map.pca = pca2(state.vecs); map.q = null; map.hits = []; map.t0 = performance.now();
+  layoutMap(); cancelAnimationFrame(map.raf); map.raf = requestAnimationFrame(drawMap);
+  addEventListener("resize", () => state && layoutMap());
+}
+function pointQuery(r) { map.q = { raw: map.pca.proj(r.qv) }; map.hits = r.found ? r.top.map((t) => t.i) : []; layoutMap(); }
 
 /* ---------- UI ---------- */
 function addEmpty() {
@@ -156,7 +223,7 @@ $("#ask").addEventListener("submit", async (e) => {
   addQ(q); $("#go").disabled = true;
   const wait = addA(`<div class="tag">Searching</div>Reading the closest passages`);
   try {
-    const r = await answer(q); wait.remove();
+    const r = await answer(q); wait.remove(); pointQuery(r);
     if (!r.found) {
       const near = r.best ? `<div class="more"><details><summary>Closest passage anyway (page ${r.best.c.page}, match ${(r.best.sem * 100).toFixed(0)}%)</summary><div class="p">${esc(r.best.c.text)}</div></details></div>` : "";
       addA(`<div class="tag">Not in this document</div>I could not find an answer to that in the pages you gave me, so I am not going to guess.${near}`, true);
@@ -192,7 +259,7 @@ async function load(file) {
       step("embed", 30 + (Math.min(i + B, chunks.length) / chunks.length) * 68);
       say(`Indexing passage ${Math.min(i + B, chunks.length)} of ${chunks.length}`);
     }
-    state = { chunks, vecs };
+    state = { chunks, vecs }; startMap();
     step("ready", 100); say("Ready. Nothing was uploaded anywhere.");
     $("#q").disabled = false; $("#go").disabled = false; $("#q").focus();
   } catch (err) {
@@ -205,4 +272,4 @@ inp.addEventListener("change", () => inp.files[0] && load(inp.files[0]));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => e.dataTransfer.files[0] && load(e.dataTransfer.files[0]));
 drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inp.click(); } });
-$("#reset").onclick = () => { state = null; pdfDoc = null; inp.value = ""; $("#work").hidden = true; $("#hero").hidden = false; };
+$("#reset").onclick = () => { cancelAnimationFrame(map.raf); state = null; pdfDoc = null; inp.value = ""; $("#work").hidden = true; $("#hero").hidden = false; };
