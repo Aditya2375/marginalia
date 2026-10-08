@@ -55,3 +55,18 @@ mark{background:rgba(224,164,88,.22);color:inherit;padding:0 2px}
 
 .mapwrap{margin:6px 0 4px}#mapCanvas{width:100%;height:170px;display:block;background:#120f0c;border:1px solid var(--line);border-radius:3px}
 .maplab{font-family:'Space Mono',monospace;font-size:10.5px;color:var(--dim);margin-top:6px;line-height:1.4}
+
+.writeRow{display:flex;gap:8px;font-size:13px;color:var(--dim);margin:10px 0 0;line-height:1.35}.writeRow[hidden]{display:none}.writeRow input{margin-top:3px;accent-color:var(--amber)}
+.written{border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:14px}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;opacity:.07;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+.ln{display:inline-block;overflow:hidden;vertical-align:top;padding-bottom:.08em}
+.ln>span,.ln>em>span{display:inline-block;transform:translateY(105%);animation:rise .9s cubic-bezier(.2,.8,.2,1) forwards}
+.ln:nth-of-type(2)>em>span{animation-delay:.15s}
+@keyframes rise{to{transform:none}}
+.lede,.drop{opacity:0;animation:fade .9s .45s ease forwards}.drop{animation-delay:.65s}
+@keyframes fade{to{opacity:1}}
+.drop{position:relative;overflow:hidden}
+.drop::after{content:"";position:absolute;inset:0;background:radial-gradient(260px circle at var(--mx,50%) var(--my,50%),rgba(224,164,88,.14),transparent 70%);opacity:0;transition:opacity .25s;pointer-events:none}
+.drop:hover::after{opacity:1}
+.a{animation:fade .5s ease both}.q{animation:fade .3s ease both}
+@media (prefers-reduced-motion:reduce){.ln>span,.ln>em>span,.lede,.drop,.a,.q{animation:none;opacity:1;transform:none}}
