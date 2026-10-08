@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marginalia - ask your documents, with page-level citations</title>
+<meta name="description" content="Drop in a PDF and ask questions. Every answer is quoted from your document with its page number, and Marginalia says so when the answer is not in there. Runs entirely in your browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="mark">&sect;</span> Marginalia</div>
+  <div class="note">Runs in your browser. Your file never leaves this device.</div>
+</header>
+
+<main>
+  <section class="hero" id="hero">
+    <h1>Ask your document.<br><em>Get the page it came from.</em></h1>
+    <p class="lede">Drop in lecture notes, a paper or a report. Marginalia reads it, finds the passages that answer your question and quotes them with page numbers. If the answer is not in the document, it tells you that instead of guessing.</p>
+    <label class="drop" id="drop" tabindex="0">
+      <input type="file" id="file" accept="application/pdf,.pdf,text/plain,.txt,.md">
+      <span class="drop-big">Drop a PDF here</span>
+      <span class="drop-small">or click to choose one. Text PDFs and .txt files work. Scanned images do not.</span>
+    </label>
+    <p class="err" id="err" role="alert" hidden></p>
+  </section>
+
+  <section class="work" id="work" hidden>
+    <aside class="side">
+      <div class="doc"><div class="doc-name" id="docName"></div><div class="doc-meta" id="docMeta"></div></div>
+      <ol class="steps" id="steps">
+        <li data-s="read"><b>Read</b><span>pages and text</span></li>
+        <li data-s="chunk"><b>Split</b><span>passages that keep their page</span></li>
+        <li data-s="embed"><b>Index</b><span>meaning vectors, on this device</span></li>
+        <li data-s="ready"><b>Ready</b><span>ask anything</span></li>
+      </ol>
+      <div class="bar"><div class="bar-in" id="bar"></div></div>
+      <div class="status" id="status">Starting</div>
+      <button class="ghost" id="reset" type="button">Use another document</button>
+      <details class="how"><summary>How answers are made</summary>
+        <p>Your question is turned into a vector and compared with every passage. The best sentences from the closest passages are quoted back, each with its page. Nothing is paraphrased or invented. If nothing is close enough, Marginalia says it could not find the answer. It cannot reason across pages or do arithmetic; it finds and quotes.</p>
+      </details>
+    </aside>
+
+    <section class="chat">
+      <div class="log" id="log" aria-live="polite"></div>
+      <form class="ask" id="ask" autocomplete="off">
+        <input id="q" type="text" placeholder="Ask something the document answers" disabled aria-label="Your question">
+        <button id="go" type="submit" disabled>Ask</button>
+      </form>
+    </section>
+
+    <section class="pagepane" id="pagepane" hidden>
+      <div class="pp-head"><span id="ppTitle"></span><button class="ghost sm" id="ppClose" type="button">Close</button></div>
+      <canvas id="ppCanvas"></canvas>
+    </section>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
