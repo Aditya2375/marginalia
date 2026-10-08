@@ -194,6 +194,30 @@ function startMap() {
 }
 function pointQuery(r) { map.q = { raw: map.pca.proj(r.qv) }; map.hits = r.found ? r.top.map((t) => t.i) : []; layoutMap(); }
 
+/* ---------- optional: written answers from a small model that runs on the GPU ---------- */
+let llm = null;
+const HAS_GPU = typeof navigator !== "undefined" && !!navigator.gpu;
+async function getLLM() {
+  if (llm) return llm;
+  const web = await import("https://esm.run/@mlc-ai/web-llm");
+  llm = await web.CreateMLCEngine("Qwen2.5-1.5B-Instruct-q4f16_1-MLC", {
+    initProgressCallback: (p) => say(`Loading the writing model (one time, about 1 GB) ${Math.round((p.progress || 0) * 100)}%`),
+  });
+  return llm;
+}
+async function compose(q, r) {
+  const eng = await getLLM();
+  const ctx = r.top.map((t) => `[p.${t.c.page}] ${t.c.text}`).join("\n\n");
+  const out = await eng.chat.completions.create({
+    temperature: 0.1, max_tokens: 320,
+    messages: [
+      { role: "system", content: "Answer the question using ONLY the passages provided. Cite the page like [p.3] after each claim. If the passages do not contain the answer, reply exactly: NOT_FOUND. Be concise." },
+      { role: "user", content: `Passages:\n${ctx}\n\nQuestion: ${q}` },
+    ],
+  });
+  return out.choices[0].message.content.trim();
+}
+
 /* ---------- UI ---------- */
 function addEmpty() {
   $("#log").innerHTML = `<div class="empty">Ask in your own words. Try a definition, a number, a name or a "why" question. Answers are quoted from your document with the page they came from.</div>`;
@@ -228,9 +252,14 @@ $("#ask").addEventListener("submit", async (e) => {
       const near = r.best ? `<div class="more"><details><summary>Closest passage anyway (page ${r.best.c.page}, match ${(r.best.sem * 100).toFixed(0)}%)</summary><div class="p">${esc(r.best.c.text)}</div></details></div>` : "";
       addA(`<div class="tag">Not in this document</div>I could not find an answer to that in the pages you gave me, so I am not going to guess.${near}`, true);
     } else {
+      let written = "";
+      if ($("#writeOn") && $("#writeOn").checked) {
+        try { const t = await compose(q, r); if (t && !/NOT_FOUND/.test(t)) written = `<div class="written"><div class="tag">Written answer (small model, check the quotes below)</div>${esc(t).replace(/\[p\.(\d+)\]/g, '<button class="cite" data-page="$1" type="button">p. $1</button>')}</div>`; say("Ready."); }
+        catch (e) { say("The writing model could not start here. Showing quotes only."); }
+      }
       const quotes = r.pick.map((x) => `<blockquote class="quote"><p>${highlight(x.s, q)}</p>${pdfDoc ? `<button class="cite" data-page="${x.page}" type="button">p. ${x.page}</button>` : `<span class="cite">section ${x.page}</span>`}</blockquote>`).join("");
       const more = r.top.map((t) => `<div class="p"><small>${pdfDoc ? "page" : "section"} ${t.c.page} &middot; match ${(t.sem * 100).toFixed(0)}%</small>${highlight(t.c.text, q)}</div>`).join("");
-      addA(`<div class="tag">Quoted from your document</div>${quotes}<div class="more"><details><summary>Show the ${r.top.length} passages searched</summary>${more}</details></div>`);
+      addA(`${written}<div class="tag">Quoted from your document</div>${quotes}<div class="more"><details><summary>Show the ${r.top.length} passages searched</summary>${more}</details></div>`);
     }
   } catch (err) { wait.remove(); addA(`<div class="tag">Error</div>${esc(String(err.message || err))}`, true); }
   $("#go").disabled = false; $("#q").focus();
@@ -272,4 +301,7 @@ inp.addEventListener("change", () => inp.files[0] && load(inp.files[0]));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => e.dataTransfer.files[0] && load(e.dataTransfer.files[0]));
 drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inp.click(); } });
+if (HAS_GPU) $("#writeRow").hidden = false;
 $("#reset").onclick = () => { cancelAnimationFrame(map.raf); state = null; pdfDoc = null; inp.value = ""; $("#work").hidden = true; $("#hero").hidden = false; };
+
+$("#drop").addEventListener("pointermove", (e) => { const r = e.currentTarget.getBoundingClientRect(); e.currentTarget.style.setProperty("--mx", e.clientX - r.left + "px"); e.currentTarget.style.setProperty("--my", e.clientY - r.top + "px"); });
