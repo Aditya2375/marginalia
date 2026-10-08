@@ -38,6 +38,7 @@
       </ol>
       <div class="bar"><div class="bar-in" id="bar"></div></div>
       <div class="status" id="status">Starting</div>
+      <div class="mapwrap"><canvas id="mapCanvas" aria-label="Map of your document's passages by meaning"></canvas><div class="maplab">Map of your document by meaning. Each dot is a passage; your question lands near the passages it matches.</div></div>
       <button class="ghost" id="reset" type="button">Use another document</button>
       <details class="how"><summary>How answers are made</summary>
         <p>Your question is turned into a vector and compared with every passage. The best sentences from the closest passages are quoted back, each with its page. Nothing is paraphrased or invented. If nothing is close enough, Marginalia says it could not find the answer. It cannot reason across pages or do arithmetic; it finds and quotes.</p>
