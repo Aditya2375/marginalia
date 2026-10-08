@@ -196,7 +196,8 @@ function pointQuery(r) { map.q = { raw: map.pca.proj(r.qv) }; map.hits = r.found
 
 /* ---------- optional: written answers from a small model that runs on the GPU ---------- */
 let llm = null;
-const HAS_GPU = typeof navigator !== "undefined" && !!navigator.gpu;
+let HAS_GPU = false;
+(async () => { try { HAS_GPU = !!(navigator.gpu && (await navigator.gpu.requestAdapter())); } catch (e) {} if (HAS_GPU) $("#writeRow").hidden = false; })();
 async function getLLM() {
   if (llm) return llm;
   const web = await import("https://esm.run/@mlc-ai/web-llm");
@@ -289,7 +290,7 @@ async function load(file) {
       say(`Indexing passage ${Math.min(i + B, chunks.length)} of ${chunks.length}`);
     }
     state = { chunks, vecs }; startMap();
-    step("ready", 100); say("Ready. Nothing was uploaded anywhere.");
+    step("ready", 100); say("Ready. Nothing was uploaded anywhere."); $("#work").classList.add("ready");
     $("#q").disabled = false; $("#go").disabled = false; $("#q").focus();
   } catch (err) {
     $("#work").hidden = true; $("#hero").hidden = false; fail(String(err.message || err));
@@ -301,7 +302,6 @@ inp.addEventListener("change", () => inp.files[0] && load(inp.files[0]));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => e.dataTransfer.files[0] && load(e.dataTransfer.files[0]));
 drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inp.click(); } });
-if (HAS_GPU) $("#writeRow").hidden = false;
-$("#reset").onclick = () => { cancelAnimationFrame(map.raf); state = null; pdfDoc = null; inp.value = ""; $("#work").hidden = true; $("#hero").hidden = false; };
+$("#reset").onclick = () => { $("#work").classList.remove("ready"); cancelAnimationFrame(map.raf); state = null; pdfDoc = null; inp.value = ""; $("#work").hidden = true; $("#hero").hidden = false; };
 
 $("#drop").addEventListener("pointermove", (e) => { const r = e.currentTarget.getBoundingClientRect(); e.currentTarget.style.setProperty("--mx", e.clientX - r.left + "px"); e.currentTarget.style.setProperty("--my", e.clientY - r.top + "px"); });
