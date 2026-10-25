@@ -277,7 +277,8 @@ async function load(file) {
     const isPdf = /pdf$/i.test(file.name) || file.type === "application/pdf";
     const pages = isPdf ? await readPdf(file) : await readText(file);
     const total = pages.reduce((n, p) => n + p.text.split(/\s+/).filter(Boolean).length, 0);
-    if (total < 30) throw new Error("There is almost no selectable text in this file. It may be a scan. Marginalia reads text, not images.");
+    if (isPdf && total < 30) throw new Error("There is almost no selectable text in this file. It may be a scan. Marginalia reads text, not images.");
+    if (!isPdf && total === 0) throw new Error("That file looks empty. Add some text and try again.");
     step("chunk", 28); say("Splitting into passages");
     const chunks = chunkPages(pages);
     $("#docMeta").textContent = `${pages.length} ${isPdf ? "pages" : "sections"} \u00b7 ${total.toLocaleString()} words \u00b7 ${chunks.length} passages`;
