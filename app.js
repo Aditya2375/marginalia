@@ -1,5 +1,9 @@
-import * as pdfjs from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.min.mjs";
-pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs";
+let pdfjs;
+async function pdfLibrary() {
+  if (!pdfjs) pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@6.5.438/build/pdf.min.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.5.438/build/pdf.worker.min.mjs";
+  return pdfjs;
+}
 
 const $ = (s) => document.querySelector(s);
 const MODEL = "Xenova/all-MiniLM-L6-v2";
@@ -8,6 +12,45 @@ const MIN_SCORE = 0.30;       // below this the best passage is not treated as a
 const STOP = new Set("a an the of and or to in on for with is are was were be been it its this that these those as at by from what which who whom how why when where do does did can could should would will about into than then so if not no yes you your i we they he she them his her our".split(" "));
 
 let extractor = null, pdfDoc = null, state = null;
+let pdfCleanup = Promise.resolve();
+let generation = 0, loadingTask = null, loadTimer = null, embedWorker = null, nextRequest = 0;
+const pending = new Map();
+const LIMITS = { bytes: 10 * 1024 * 1024, pages: 120, words: 40000, chunks: 240, chars: 300000 };
+function checkRun(run) { if (run !== generation) throw new Error("Cancelled"); }
+function stopWorker() {
+  embedWorker?.terminate(); embedWorker = null; extractor = null;
+  for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(new Error("Cancelled")); }
+  pending.clear();
+}
+function workerCall(type, texts = []) {
+  if (!embedWorker) {
+    embedWorker = new Worker(new URL("embed-worker.js", import.meta.url), { type: "module" });
+    embedWorker.onmessage = ({ data }) => {
+      const entry = pending.get(data.id); if (!entry) return;
+      if (data.progress) { say(data.progress); return; }
+      clearTimeout(entry.timer); pending.delete(data.id);
+      data.error ? entry.reject(new Error(data.error)) : entry.resolve(data.vecs);
+    };
+    embedWorker.onerror = () => stopWorker();
+  }
+  return new Promise((resolve, reject) => {
+    const id = ++nextRequest;
+    const timer = setTimeout(() => { stopWorker(); say("Model deadline reached. Try a smaller document."); }, type === "init" ? 120000 : 45000);
+    pending.set(id, {resolve, reject, timer}); embedWorker.postMessage({id, type, texts});
+  });
+}
+function resetSession() {
+  generation++; clearTimeout(loadTimer); stopWorker();
+  const oldTask = loadingTask, oldDoc = pdfDoc; loadingTask = null; pdfDoc = null; state = null;
+  pdfCleanup = Promise.resolve(oldTask ? oldTask.destroy() : oldDoc?.destroy()).catch(() => {});
+  cancelAnimationFrame(map.raf); map.pts = []; map.q = null;
+  if (llm) { llm.interruptGenerate(); llm.unload().catch(() => {}); llm = null; }
+  llmPromise = null;
+  $("#pagepane").hidden = true; $("#work").classList.remove("ready"); $("#work").hidden = true; $("#hero").hidden = false;
+}
+function deadline(promise, ms) {
+  let timer; return Promise.race([promise, new Promise((_, reject) => {timer = setTimeout(() => reject(new Error("Deadline reached. Reset and try again.")), ms);})]).finally(() => clearTimeout(timer));
+}
 
 function say(msg) { $("#status").textContent = msg; }
 function step(name, pct) {
@@ -26,19 +69,26 @@ const stem = (w) => w.replace(/(ing|ed|es|s)$/, "");
 const keyWords = (s) => words(s).filter((w) => !STOP.has(w) && w.length > 2);
 
 /* ---------- read ---------- */
-async function readPdf(file) {
+async function readPdf(file, run) {
+  await pdfCleanup; await pdfLibrary(); checkRun(run);
   const buf = await file.arrayBuffer();
-  pdfDoc = await pdfjs.getDocument({ data: buf.slice(0) }).promise;
+  checkRun(run);
+  loadingTask = pdfjs.getDocument({ data: buf.slice(0), isEvalSupported: false, stopAtErrors: true, useSystemFonts: false });
+  const loaded = await loadingTask.promise; checkRun(run); pdfDoc = loaded;
+  if (pdfDoc.numPages > LIMITS.pages) throw new Error("Limit: 120 pages. Split this document first.");
+  let characters = 0;
   const pages = [];
   for (let p = 1; p <= pdfDoc.numPages; p++) {
-    const page = await pdfDoc.getPage(p);
-    const tc = await page.getTextContent();
+    checkRun(run); const page = await pdfDoc.getPage(p);
+    const tc = await page.getTextContent(); checkRun(run);
     let text = "", lastY = null;
     for (const it of tc.items) {
       if (lastY !== null && Math.abs(it.transform[5] - lastY) > 2) text += " ";
       text += it.str + (it.hasEOL ? " " : "");
       lastY = it.transform[5];
     }
+    characters += text.length; if (characters > LIMITS.chars) throw new Error("Limit: 300,000 text characters.");
+    page.cleanup();
     pages.push({ page: p, text: text.replace(/\s+/g, " ").trim() });
     step("read", (p / pdfDoc.numPages) * 25);
     say(`Reading page ${p} of ${pdfDoc.numPages}`);
@@ -48,6 +98,7 @@ async function readPdf(file) {
 async function readText(file) {
   pdfDoc = null;
   const t = (await file.text()).replace(/\r/g, "");
+  if (t.length > LIMITS.chars) throw new Error("Limit: 300,000 text characters.");
   const parts = t.split(/\n{2,}/), pages = [];
   let cur = "", n = 1;
   for (const p of parts) { if ((cur + p).split(/\s+/).length > 350 && cur) { pages.push({ page: n++, text: cur.replace(/\s+/g, " ").trim() }); cur = ""; } cur += p + " "; }
@@ -61,7 +112,11 @@ function chunkPages(pages) {
   const chunks = [];
   for (const pg of pages) {
     if (!pg.text) continue;
-    const sents = sentences(pg.text);
+    const sents = sentences(pg.text).flatMap(s => {
+      const w = s.split(/\s+/), parts = [];
+      for (let i = 0; i < w.length; i += CHUNK_WORDS) parts.push(w.slice(i, i + CHUNK_WORDS).join(" "));
+      return parts;
+    });
     let buf = [], count = 0;
     const flush = () => { if (buf.length) chunks.push({ page: pg.page, text: buf.join(" "), sents: buf.slice() }); };
     for (const s of sents) {
@@ -81,20 +136,12 @@ function chunkPages(pages) {
 
 /* ---------- embed ---------- */
 async function getExtractor() {
-  if (extractor) return extractor;
-  say("Loading the language model (first time only, about 25 MB)");
-  const tf = await import("https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2");
-  tf.env.allowLocalModels = false;
-  extractor = await tf.pipeline("feature-extraction", MODEL, {
-    progress_callback: (p) => { if (p.status === "progress" && p.total) say(`Downloading model ${Math.round((p.loaded / p.total) * 100)}%`); },
-  });
-  return extractor;
+  if (!extractor) { say("Loading the local search model. Network access is needed on first use."); extractor = workerCall("init").catch(e => {extractor = null; throw e;}); }
+  await extractor;
 }
 async function embed(texts) {
-  const ex = await getExtractor();
-  const out = await ex(texts, { pooling: "mean", normalize: true });
-  const d = out.dims[1], arr = out.data, vecs = [];
-  for (let i = 0; i < texts.length; i++) vecs.push(arr.slice(i * d, (i + 1) * d));
+  const run = generation; await getExtractor(); checkRun(run); const vecs = [];
+  for (let i = 0; i < texts.length; i += 16) { vecs.push(...await workerCall("embed", texts.slice(i, i+16))); checkRun(run); }
   return vecs;
 }
 const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
@@ -106,8 +153,9 @@ function lexical(q, text) {
   qs.forEach((w) => { if (ts.has(w)) hit++; });
   return hit / qs.size;
 }
-async function answer(q) {
-  const [qv] = await embed([q]);
+async function answer(q, run) {
+  const doc = state;
+  const [qv] = await embed([q]); checkRun(run);
   const scored = state.chunks.map((c, i) => {
     const sem = dot(qv, state.vecs[i]), lex = lexical(q, c.text);
     return { c, i, sem, lex, score: sem * 0.7 + lex * 0.3 };
@@ -120,7 +168,7 @@ async function answer(q) {
   if (!best || !(bestLex >= 0.5 || bestSem >= 0.36)) return { ...base, found: false };
   const cand = [];
   for (const t of top) for (const s of t.c.sents) if (s.split(/\s+/).length >= 4) cand.push({ s, page: t.c.page, chunk: t.c });
-  const sv = await embed(cand.map((x) => x.s));
+  const sv = await embed(cand.map((x) => x.s)); checkRun(run);
   cand.forEach((x, i) => { x.sem = dot(qv, sv[i]); x.lex = lexical(q, x.s); x.score = x.sem * 0.6 + x.lex * 0.4; });
   cand.sort((a, b) => b.score - a.score);
   const lead = cand[0];
@@ -185,30 +233,38 @@ function drawMap(now) {
     g.beginPath(); g.moveTo(qp[0] - 6 * dpr, qp[1]); g.lineTo(qp[0] + 6 * dpr, qp[1]); g.moveTo(qp[0], qp[1] - 6 * dpr); g.lineTo(qp[0], qp[1] + 6 * dpr);
     g.strokeStyle = "#efe7d8"; g.lineWidth = 1.5 * dpr; g.stroke();
   }
-  map.raf = requestAnimationFrame(drawMap);
+  if (!matchMedia("(prefers-reduced-motion: reduce)").matches && (t < 4)) map.raf = requestAnimationFrame(drawMap);
 }
 function startMap() {
   map.pca = pca2(state.vecs); map.q = null; map.hits = []; map.t0 = performance.now();
   layoutMap(); cancelAnimationFrame(map.raf); map.raf = requestAnimationFrame(drawMap);
-  addEventListener("resize", () => state && layoutMap());
+
 }
-function pointQuery(r) { map.q = { raw: map.pca.proj(r.qv) }; map.hits = r.found ? r.top.map((t) => t.i) : []; layoutMap(); }
+addEventListener("resize", () => { if (state) { layoutMap(); drawMap(performance.now()); } });
+function pointQuery(r) { map.t0 = performance.now(); map.q = { raw: map.pca.proj(r.qv) }; map.hits = r.found ? r.top.map((t) => t.i) : []; layoutMap(); cancelAnimationFrame(map.raf); drawMap(performance.now()); }
 
 /* ---------- optional: written answers from a small model that runs on the GPU ---------- */
-let llm = null;
+let llm = null, llmPromise = null;
 let HAS_GPU = false;
 (async () => { try { HAS_GPU = !!(navigator.gpu && (await navigator.gpu.requestAdapter())); } catch (e) {} if (HAS_GPU) $("#writeRow").hidden = false; })();
-async function getLLM() {
-  if (llm) return llm;
-  const web = await import("https://esm.run/@mlc-ai/web-llm");
-  llm = await web.CreateMLCEngine("Qwen2.5-1.5B-Instruct-q4f16_1-MLC", {
+async function createLLM() {
+  const run = generation;
+  const web = await import("https://esm.run/@mlc-ai/web-llm@0.2.79");
+  checkRun(run); const engine = await web.CreateMLCEngine("Qwen2.5-1.5B-Instruct-q4f16_1-MLC", {
     initProgressCallback: (p) => say(`Loading the writing model (one time, about 1 GB) ${Math.round((p.progress || 0) * 100)}%`),
   });
-  return llm;
+  if (run !== generation) { await engine.unload(); throw new Error("Cancelled"); }
+  llm = engine; return llm;
+}
+async function getLLM() {
+  if (llm) return llm;
+  if (!llmPromise) llmPromise = createLLM().catch(e => { llmPromise = null; throw e; });
+  return llmPromise;
 }
 async function compose(q, r) {
   const eng = await getLLM();
   const ctx = r.top.map((t) => `[p.${t.c.page}] ${t.c.text}`).join("\n\n");
+  const run = generation; checkRun(run);
   const out = await eng.chat.completions.create({
     temperature: 0.1, max_tokens: 320,
     messages: [
@@ -216,7 +272,7 @@ async function compose(q, r) {
       { role: "user", content: `Passages:\n${ctx}\n\nQuestion: ${q}` },
     ],
   });
-  return out.choices[0].message.content.trim();
+  checkRun(run); return out.choices[0].message.content.trim();
 }
 
 /* ---------- UI ---------- */
@@ -232,68 +288,82 @@ function highlight(text, q) {
 async function showPage(n) {
   if (!pdfDoc) return;
   $("#pagepane").hidden = false; $("#ppTitle").textContent = `Page ${n} of ${pdfDoc.numPages}`;
-  const page = await pdfDoc.getPage(n);
-  const vp = page.getViewport({ scale: 1.6 }), cv = $("#ppCanvas");
+  const run = generation, doc = pdfDoc;
+  if (!Number.isInteger(n) || n < 1 || n > doc.numPages) return;
+  const page = await doc.getPage(n); checkRun(run);
+  const base = page.getViewport({ scale: 1 });
+  const vp = page.getViewport({ scale: Math.min(1.6, 2000 / Math.max(base.width, base.height)) }), cv = $("#ppCanvas");
   cv.width = vp.width; cv.height = vp.height;
   await page.render({ canvasContext: cv.getContext("2d"), viewport: vp }).promise;
 }
 $("#ppClose").onclick = () => ($("#pagepane").hidden = true);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#pagepane").hidden = true; });
-$("#log").addEventListener("click", (e) => { const b = e.target.closest("[data-page]"); if (b) showPage(+b.dataset.page); });
+$("#log").addEventListener("click", (e) => { const b = e.target.closest("[data-page]"); if (b) showPage(+b.dataset.page).catch(e => say(e.message)); });
 
 $("#ask").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const q = $("#q").value.trim(); if (!q || !state) return;
+  const q = $("#q").value.trim(); if (!q || !state || $("#go").disabled) return;
+  const run = generation;
+  if (q.length > 500) return say("Limit: 500 characters per question.");
+  while ($("#log").children.length > 18) $("#log").firstElementChild.remove();
   $("#q").value = ""; if ($("#log .empty")) $("#log").innerHTML = "";
   addQ(q); $("#go").disabled = true;
   const wait = addA(`<div class="tag">Searching</div>Reading the closest passages`);
   try {
-    const r = await answer(q); wait.remove(); pointQuery(r);
+    const r = await answer(q, run); checkRun(run); wait.remove(); pointQuery(r);
     if (!r.found) {
-      const near = r.best ? `<div class="more"><details><summary>Closest passage anyway (page ${r.best.c.page}, match ${(r.best.sem * 100).toFixed(0)}%)</summary><div class="p">${esc(r.best.c.text)}</div></details></div>` : "";
+      const near = r.best ? `<div class="more"><details><summary>Closest passage anyway (page ${r.best.c.page}, similarity ${(r.best.sem * 100).toFixed(0)}% (not confidence))</summary><div class="p">${esc(r.best.c.text)}</div></details></div>` : "";
       addA(`<div class="tag">Not in this document</div>I could not find an answer to that in the pages you gave me, so I am not going to guess.${near}`, true);
     } else {
       let written = "";
       if ($("#writeOn") && $("#writeOn").checked) {
-        try { const t = await compose(q, r); if (t && !/NOT_FOUND/.test(t)) written = `<div class="written"><div class="tag">Written answer (small model, check the quotes below)</div>${esc(t).replace(/\[p\.(\d+)\]/g, '<button class="cite" data-page="$1" type="button">p. $1</button>')}</div>`; say("Ready."); }
-        catch (e) { say("The writing model could not start here. Showing quotes only."); }
+        try { const t = await deadline(compose(q, r), 120000); checkRun(run); if (t && !/NOT_FOUND/.test(t)) written = `<div class="written"><div class="tag">Written answer (small model, check the quotes below)</div>${esc(t).replace(/\[p\.(\d+)\]/g, '<button class="cite" data-page="$1" type="button">p. $1</button>')}</div>`; say("Ready."); }
+        catch (e) { checkRun(run); if (llm) llm.interruptGenerate(); say("The writing model could not finish. Showing quotes only."); }
       }
+      checkRun(run);
       const quotes = r.pick.map((x) => `<blockquote class="quote"><p>${highlight(x.s, q)}</p>${pdfDoc ? `<button class="cite" data-page="${x.page}" type="button">p. ${x.page}</button>` : `<span class="cite">section ${x.page}</span>`}</blockquote>`).join("");
-      const more = r.top.map((t) => `<div class="p"><small>${pdfDoc ? "page" : "section"} ${t.c.page} &middot; match ${(t.sem * 100).toFixed(0)}%</small>${highlight(t.c.text, q)}</div>`).join("");
+      const more = r.top.map((t) => `<div class="p"><small>${pdfDoc ? "page" : "section"} ${t.c.page} &middot; similarity ${(t.sem * 100).toFixed(0)}% (not confidence)</small>${highlight(t.c.text, q)}</div>`).join("");
       addA(`${written}<div class="tag">Quoted from your document</div>${quotes}<div class="more"><details><summary>Show the ${r.top.length} passages searched</summary>${more}</details></div>`);
     }
-  } catch (err) { wait.remove(); addA(`<div class="tag">Error</div>${esc(String(err.message || err))}`, true); }
-  $("#go").disabled = false; $("#q").focus();
+  } catch (err) { if (run !== generation) return; wait.remove(); addA(`<div class="tag">Error</div>${esc(String(err.message || err))}`, true); }
+  if (run === generation) { $("#go").disabled = false; $("#q").focus(); }
 });
 
 async function load(file) {
+  resetSession(); const run = generation;
   $("#err").hidden = true;
-  if (file.size > 60 * 1024 * 1024) return fail("That file is over 60 MB. Try a smaller one.");
+  if (file.size > LIMITS.bytes) return fail("Limit: 10 MB. Try a smaller file.");
+  if (!/\.(pdf|txt|md)$/i.test(file.name)) return fail("Choose a PDF, TXT or MD file.");
+  loadTimer = setTimeout(() => { if (run === generation) { resetSession(); $("#work").hidden = true; $("#hero").hidden = false; fail("Indexing exceeded 3 minutes. Try a smaller file."); } }, 180000);
   $("#hero").hidden = true; $("#work").hidden = false;
   $("#docName").textContent = file.name; $("#docMeta").textContent = `${(file.size / 1024 / 1024).toFixed(2)} MB`;
   $("#q").disabled = true; $("#go").disabled = true; addEmpty();
   try {
     step("read", 0);
     const isPdf = /pdf$/i.test(file.name) || file.type === "application/pdf";
-    const pages = isPdf ? await readPdf(file) : await readText(file);
+    const pages = isPdf ? await readPdf(file, run) : await readText(file);
+    checkRun(run);
     const total = pages.reduce((n, p) => n + p.text.split(/\s+/).filter(Boolean).length, 0);
     if (isPdf && total < 30) throw new Error("There is almost no selectable text in this file. It may be a scan. Marginalia reads text, not images.");
     if (!isPdf && total === 0) throw new Error("That file looks empty. Add some text and try again.");
+    if (total > LIMITS.words) throw new Error("Limit: 40,000 words. Split this document first.");
     step("chunk", 28); say("Splitting into passages");
     const chunks = chunkPages(pages);
+    if (!chunks.length || chunks.length > LIMITS.chunks) throw new Error("Limit: 1 to 240 passages. Try a shorter document.");
     $("#docMeta").textContent = `${pages.length} ${isPdf ? "pages" : "sections"} \u00b7 ${total.toLocaleString()} words \u00b7 ${chunks.length} passages`;
     step("embed", 30);
-    await getExtractor();
+    await getExtractor(); checkRun(run);
     const vecs = [], B = 16;
     for (let i = 0; i < chunks.length; i += B) {
-      vecs.push(...(await embed(chunks.slice(i, i + B).map((c) => c.text))));
+      vecs.push(...(await embed(chunks.slice(i, i + B).map((c) => c.text)))); checkRun(run);
       step("embed", 30 + (Math.min(i + B, chunks.length) / chunks.length) * 68);
       say(`Indexing passage ${Math.min(i + B, chunks.length)} of ${chunks.length}`);
     }
-    state = { chunks, vecs }; startMap();
-    step("ready", 100); say("Ready. Nothing was uploaded anywhere."); $("#work").classList.add("ready");
+    clearTimeout(loadTimer); checkRun(run); state = { chunks, vecs }; startMap();
+    step("ready", 100); say("Ready. Search runs locally; check the quoted passages."); $("#work").classList.add("ready");
     $("#q").disabled = false; $("#go").disabled = false; $("#q").focus();
   } catch (err) {
+    if (run !== generation) return; resetSession();
     $("#work").hidden = true; $("#hero").hidden = false; fail(String(err.message || err));
   }
 }
@@ -303,6 +373,6 @@ inp.addEventListener("change", () => inp.files[0] && load(inp.files[0]));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => e.dataTransfer.files[0] && load(e.dataTransfer.files[0]));
 drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inp.click(); } });
-$("#reset").onclick = () => { $("#work").classList.remove("ready"); cancelAnimationFrame(map.raf); state = null; pdfDoc = null; inp.value = ""; $("#work").hidden = true; $("#hero").hidden = false; };
+$("#reset").onclick = () => { resetSession(); inp.value = ""; $("#work").hidden = true; $("#hero").hidden = false; };
 
 $("#drop").addEventListener("pointermove", (e) => { const r = e.currentTarget.getBoundingClientRect(); e.currentTarget.style.setProperty("--mx", e.clientX - r.left + "px"); e.currentTarget.style.setProperty("--my", e.clientY - r.top + "px"); });
