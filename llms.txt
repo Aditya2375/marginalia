@@ -1,0 +1,2 @@
+# Marginalia
+Local document passage search. Approximate, not a fact verifier. Limits and privacy: /README.md
