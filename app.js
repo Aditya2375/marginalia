@@ -12,6 +12,7 @@ const MIN_SCORE = 0.30;       // below this the best passage is not treated as a
 const STOP = new Set("a an the of and or to in on for with is are was were be been it its this that these those as at by from what which who whom how why when where do does did can could should would will about into than then so if not no yes you your i we they he she them his her our".split(" "));
 
 let extractor = null, pdfDoc = null, state = null;
+let questionTimer = null;
 let pdfCleanup = Promise.resolve();
 let generation = 0, loadingTask = null, loadTimer = null, embedWorker = null, nextRequest = 0;
 const pending = new Map();
@@ -40,7 +41,7 @@ function workerCall(type, texts = []) {
   });
 }
 function resetSession() {
-  generation++; clearTimeout(loadTimer); stopWorker();
+  generation++; clearTimeout(loadTimer); clearTimeout(questionTimer); stopWorker();
   const oldTask = loadingTask, oldDoc = pdfDoc; loadingTask = null; pdfDoc = null; state = null;
   pdfCleanup = Promise.resolve(oldTask ? oldTask.destroy() : oldDoc?.destroy()).catch(() => {});
   cancelAnimationFrame(map.raf); map.pts = []; map.q = null;
@@ -308,6 +309,7 @@ $("#ask").addEventListener("submit", async (e) => {
   while ($("#log").children.length > 18) $("#log").firstElementChild.remove();
   $("#q").value = ""; if ($("#log .empty")) $("#log").innerHTML = "";
   addQ(q); $("#go").disabled = true;
+  questionTimer = setTimeout(() => { if (run === generation) { resetSession(); fail("Search exceeded 3 minutes. Reload a shorter document."); } }, 180000);
   const wait = addA(`<div class="tag">Searching</div>Reading the closest passages`);
   try {
     const r = await answer(q, run); checkRun(run); wait.remove(); pointQuery(r);
@@ -326,7 +328,7 @@ $("#ask").addEventListener("submit", async (e) => {
       addA(`${written}<div class="tag">Quoted from your document</div>${quotes}<div class="more"><details><summary>Show the ${r.top.length} passages searched</summary>${more}</details></div>`);
     }
   } catch (err) { if (run !== generation) return; wait.remove(); addA(`<div class="tag">Error</div>${esc(String(err.message || err))}`, true); }
-  if (run === generation) { $("#go").disabled = false; $("#q").focus(); }
+  if (run === generation) { clearTimeout(questionTimer); $("#go").disabled = false; $("#q").focus(); }
 });
 
 async function load(file) {
