@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://marginalia-eta-eight.vercel.app/sitemap.xml
